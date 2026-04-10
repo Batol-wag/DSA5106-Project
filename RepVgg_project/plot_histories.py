@@ -8,24 +8,26 @@ for the CIFAR-10 experiments.
 
 Objective:
 ----------
-Visualize how RepVGG, PlainCNN, and ResNet-18 behave during training under
-the same pipeline.
+Visualize how RepVGG, ResNet-18, and ResNet-34 behave during training
+under the same pipeline.
 
 Generated plots:
 ----------------
 1. Training loss vs epoch
 2. Test accuracy vs epoch
+3. Final accuracy bar chart (Top-1 summary across all models)
 
 Input files:
 ------------
 - results/repvgg_history.json
-- results/plaincnn_history.json
 - results/resnet18_history.json
+- results/resnet34_history.json
 
 Output files:
 -------------
 - figures/train_loss_comparison.png
 - figures/test_accuracy_comparison.png
+- figures/final_accuracy_comparison.png
 """
 
 from __future__ import annotations
@@ -84,6 +86,35 @@ def plot_test_accuracy(histories: dict[str, dict], save_path: Path) -> None:
     plt.close()
 
 
+def plot_final_comparison(histories: dict[str, dict], save_path: Path) -> None:
+    """
+    Plot a bar chart of final test Top-1 accuracy across all models.
+    """
+    model_names = list(histories.keys())
+    final_accs = [histories[m]["test_acc"][-1] for m in model_names]
+
+    plt.figure(figsize=(8, 5))
+    bars = plt.bar(model_names, final_accs, color=["steelblue", "darkorange", "green", "crimson"])
+
+    for bar, acc in zip(bars, final_accs):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.3,
+            f"{acc:.2f}%",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+        )
+
+    plt.ylabel("Test Accuracy (%)")
+    plt.title("Final Test Accuracy on CIFAR-10 (Top-1)")
+    plt.ylim(0, 100)
+    plt.grid(axis="y", linestyle="--", alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+
 def main() -> None:
     """
     Main plotting function.
@@ -96,8 +127,8 @@ def main() -> None:
 
     history_files = {
         "RepVGG": results_dir / "repvgg_history.json",
-        "PlainCNN": results_dir / "plaincnn_history.json",
         "ResNet-18": results_dir / "resnet18_history.json",
+        "ResNet-34": results_dir / "resnet34_history.json",
     }
 
     histories = {}
@@ -116,9 +147,15 @@ def main() -> None:
         save_path=figures_dir / "test_accuracy_comparison.png",
     )
 
+    plot_final_comparison(
+        histories=histories,
+        save_path=figures_dir / "final_accuracy_comparison.png",
+    )
+
     print("Plots saved successfully.")
-    print(f"Train loss plot: {figures_dir / 'train_loss_comparison.png'}")
-    print(f"Test accuracy plot: {figures_dir / 'test_accuracy_comparison.png'}")
+    print(f"Train loss plot      : {figures_dir / 'train_loss_comparison.png'}")
+    print(f"Test accuracy plot   : {figures_dir / 'test_accuracy_comparison.png'}")
+    print(f"Final accuracy chart : {figures_dir / 'final_accuracy_comparison.png'}")
 
 
 if __name__ == "__main__":

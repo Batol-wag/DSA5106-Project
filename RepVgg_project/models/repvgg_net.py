@@ -1,21 +1,18 @@
 """
 repvgg_net.py
 
-Purpose:
+RepVGG model definitions for both CIFAR-10 and ImageNet-style experiments.
+
+Key idea
 --------
-This file implements a small RepVGG-style network built from RepVGG blocks.
-
-Objective:
-----------
-Provide a full image classification model that:
-- uses RepVGGBlock as the core building unit
-- supports training-time multi-branch structure
-- can be converted fully into deploy mode
-
-This version is designed for small-scale experiments such as CIFAR-10.
+- CIFAR-10: keep a small, lightweight adaptation for 32x32 inputs.
+- ImageNet: expose paper-style depth profiles so the same codebase can switch
+  between small local experiments and larger HPC runs.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -23,72 +20,90 @@ import torch.nn as nn
 from models.repvgg_block import RepVGGBlock
 
 
+@dataclass(frozen=True)
+class RepVGGConfig:
+    """
+    Configuration for a RepVGG variant.
+
+    stage_channels:
+        [stem, stage1, stage2, stage3, stage4]
+    num_blocks:
+        Number of blocks in stages 1-4.
+    stem_stride:
+        Stride of the very first block.
+    stage1_stride:
+        Stride of stage 1.
+    """
+    stage_channels: list[int]
+    num_blocks: list[int]
+    stem_stride: int
+    stage1_stride: int
+    num_classes: int = 1000
+
+
 class RepVGG(nn.Module):
     """
-    Small RepVGG-style classifier.
+    Flexible RepVGG classifier.
 
-    Architecture:
-    -------------
-    - Stem block
-    - 4 stages of RepVGG blocks
-    - Global average pooling
-    - Fully connected classifier
+    This class supports both:
+    - CIFAR-style experiments (small inputs, lighter architecture)
+    - ImageNet-style experiments (paper-inspired depth/width)
 
-    Notes:
-    ------
-    This version is simplified for reproduction experiments on CIFAR-10.
+    Architecture
+    ------------
+    stage0 (stem) -> stage1 -> stage2 -> stage3 -> stage4
+    -> global average pooling -> linear classifier
     """
 
     def __init__(
         self,
-        num_blocks: list[int],
-        width_multiplier: list[int],
-        num_classes: int = 10,
+        config: RepVGGConfig,
         deploy: bool = False,
     ) -> None:
         super().__init__()
 
-        if len(num_blocks) != 4:
+        if len(config.stage_channels) != 5:
+            raise ValueError("stage_channels must have length 5")
+        if len(config.num_blocks) != 4:
             raise ValueError("num_blocks must have length 4")
-        if len(width_multiplier) != 4:
-            raise ValueError("width_multiplier must have length 4")
 
         self.deploy = deploy
-        self.in_channels = min(64, 32 * width_multiplier[0])
+        self.config = config
+        self.in_channels = config.stage_channels[0]
 
         self.stage0 = RepVGGBlock(
             in_channels=3,
-            out_channels=self.in_channels,
-            stride=1,
+            out_channels=config.stage_channels[0],
+            stride=config.stem_stride,
             deploy=deploy,
         )
 
         self.stage1 = self._make_stage(
-            out_channels=32 * width_multiplier[0],
-            num_blocks=num_blocks[0],
-            stride=1,
+            out_channels=config.stage_channels[1],
+            num_blocks=config.num_blocks[0],
+            stride=config.stage1_stride,
         )
 
         self.stage2 = self._make_stage(
-            out_channels=64 * width_multiplier[1],
-            num_blocks=num_blocks[1],
+            out_channels=config.stage_channels[2],
+            num_blocks=config.num_blocks[1],
             stride=2,
         )
 
         self.stage3 = self._make_stage(
-            out_channels=128 * width_multiplier[2],
-            num_blocks=num_blocks[2],
+            out_channels=config.stage_channels[3],
+            num_blocks=config.num_blocks[2],
             stride=2,
         )
 
         self.stage4 = self._make_stage(
-            out_channels=256 * width_multiplier[3],
-            num_blocks=num_blocks[3],
+            out_channels=config.stage_channels[4],
+            num_blocks=config.num_blocks[3],
             stride=2,
         )
 
         self.gap = nn.AdaptiveAvgPool2d(output_size=1)
-        self.linear = nn.Linear(256 * width_multiplier[3], num_classes)
+        self.linear = nn.Linear(config.stage_channels[4], config.num_classes)
 
     def _make_stage(
         self,
@@ -96,13 +111,7 @@ class RepVGG(nn.Module):
         num_blocks: int,
         stride: int,
     ) -> nn.Sequential:
-        """
-        Build one stage of RepVGG blocks.
-
-        The first block may downsample using the provided stride.
-        Remaining blocks use stride=1.
-        """
-        blocks = []
+        blocks: list[nn.Module] = []
 
         strides = [stride] + [1] * (num_blocks - 1)
         for current_stride in strides:
@@ -119,9 +128,6 @@ class RepVGG(nn.Module):
         return nn.Sequential(*blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass.
-        """
         x = self.stage0(x)
         x = self.stage1(x)
         x = self.stage2(x)
@@ -131,25 +137,134 @@ class RepVGG(nn.Module):
         x = self.gap(x)
         x = torch.flatten(x, start_dim=1)
         x = self.linear(x)
-
         return x
 
     def switch_to_deploy(self) -> None:
         """
-        Convert all RepVGG blocks in the model to deploy mode.
+        Convert every RepVGG block into its deploy-time single-conv form.
         """
         for module in self.modules():
             if isinstance(module, RepVGGBlock):
                 module.switch_to_deploy()
 
 
+def _paper_style_stage_channels(
+    a_multiplier: float,
+    b_multiplier: float,
+) -> list[int]:
+    """
+    Paper-style width rule:
+    [min(64, 64a), 64a, 128a, 256a, 512b]
+    """
+    stem = min(64, int(round(64 * a_multiplier)))
+    stage1 = int(round(64 * a_multiplier))
+    stage2 = int(round(128 * a_multiplier))
+    stage3 = int(round(256 * a_multiplier))
+    stage4 = int(round(512 * b_multiplier))
+    return [stem, stage1, stage2, stage3, stage4]
+
+
 def create_repvgg_small(num_classes: int = 10, deploy: bool = False) -> RepVGG:
     """
-    Factory function for a small RepVGG suitable for CIFAR-10.
+    Deliberately scaled-down CIFAR-10 RepVGG.
+
+    Differences from the paper:
+    - depth: [2, 2, 2, 2] instead of paper-style [2, 4, 14, 1] / [4, 6, 16, 1]
+    - width: [32, 32, 64, 128, 256]
+    - stem stride 1 for 32x32 inputs
     """
-    return RepVGG(
+    config = RepVGGConfig(
+        stage_channels=[32, 32, 64, 128, 256],
         num_blocks=[2, 2, 2, 2],
-        width_multiplier=[1, 1, 1, 1],
+        stem_stride=1,
+        stage1_stride=1,
         num_classes=num_classes,
-        deploy=deploy,
     )
+    return RepVGG(config=config, deploy=deploy)
+
+
+def create_repvgg_imagenet_a(
+    num_classes: int = 1000,
+    deploy: bool = False,
+    a_multiplier: float = 1.0,
+    b_multiplier: float = 2.5,
+) -> RepVGG:
+    """
+    ImageNet-style RepVGG-A depth profile:
+    [2, 4, 14, 1]
+    """
+    config = RepVGGConfig(
+        stage_channels=_paper_style_stage_channels(a_multiplier, b_multiplier),
+        num_blocks=[2, 4, 14, 1],
+        stem_stride=2,
+        stage1_stride=2,
+        num_classes=num_classes,
+    )
+    return RepVGG(config=config, deploy=deploy)
+
+
+def create_repvgg_imagenet_b(
+    num_classes: int = 1000,
+    deploy: bool = False,
+    a_multiplier: float = 1.0,
+    b_multiplier: float = 2.5,
+) -> RepVGG:
+    """
+    ImageNet-style RepVGG-B depth profile:
+    [4, 6, 16, 1]
+    """
+    config = RepVGGConfig(
+        stage_channels=_paper_style_stage_channels(a_multiplier, b_multiplier),
+        num_blocks=[4, 6, 16, 1],
+        stem_stride=2,
+        stage1_stride=2,
+        num_classes=num_classes,
+    )
+    return RepVGG(config=config, deploy=deploy)
+
+
+def build_repvgg(
+    dataset: str,
+    variant: str,
+    num_classes: int,
+    deploy: bool = False,
+    a_multiplier: float = 1.0,
+    b_multiplier: float = 2.5,
+) -> RepVGG:
+    """
+    Unified RepVGG factory.
+
+    Supported combinations
+    ----------------------
+    CIFAR-10:
+        variant = "small"
+
+    Tiny ImageNet:
+        variant = "a" or "b"
+    """
+    dataset = dataset.lower()
+    variant = variant.lower()
+
+    if dataset == "cifar10":
+        if variant != "small":
+            raise ValueError("For CIFAR-10, RepVGG variant must be 'small'")
+        return create_repvgg_small(num_classes=num_classes, deploy=deploy)
+
+    if dataset == "tiny_imagenet":
+        if variant == "a":
+            return create_repvgg_imagenet_a(
+                num_classes=num_classes,
+                deploy=deploy,
+                a_multiplier=a_multiplier,
+                b_multiplier=b_multiplier,
+            )
+        if variant == "b":
+            return create_repvgg_imagenet_b(
+                num_classes=num_classes,
+                deploy=deploy,
+                a_multiplier=a_multiplier,
+                b_multiplier=b_multiplier,
+            )
+        raise ValueError("For Tiny ImageNet, RepVGG variant must be 'a' or 'b'")
+
+    raise ValueError(f"Unsupported dataset: {dataset}")
