@@ -1,1 +1,4 @@
 data/cifar-10-python.tar.gz
+outputs/baseline_resnet18.pth
+outputs/baseline_resnet18_history.json
+outputs/baseline_resnet18_figures

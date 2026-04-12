@@ -14,6 +14,7 @@ def build_history(config) -> dict:
         "data_augment": config.data_augment,
         "batch_size": config.batch_size,
         "epochs": config.epochs,
+        "scheduler": config.scheduler,
         "lr": config.lr,
         "momentum": config.momentum,
         "weight_decay": config.weight_decay,

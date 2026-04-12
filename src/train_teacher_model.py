@@ -26,13 +26,14 @@ class Config:
     save_path: str = "./outputs/best_resnet18_cifar10.pth"
     data_augment: str = "Cutout"
     batch_size: int = 128
-    epochs: int = 200
+    epochs: int = 120
     lr: float = 0.1
     momentum: float = 0.9
     weight_decay: float = 5e-4
     num_classes: int = 10
     num_workers: int = 4
     seed: int = 42
+    scheduler: str = "cosine_annealing"
     label_smoothing: float = 0.1
     mixup_alpha: float = 0.2
     cutout_holes: int = 1

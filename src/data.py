@@ -4,8 +4,6 @@ import torchvision.transforms as transforms
 
 
 class Cutout:
-    """Randomly mask square patches from an image tensor."""
-
     def __init__(self, n_holes: int = 1, length: int = 16) -> None:
         self.n_holes = n_holes
         self.length = length
