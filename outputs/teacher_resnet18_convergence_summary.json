@@ -1,0 +1,8 @@
+{
+    "best_val_top1_acc": 96.26,
+    "best_epoch": 117,
+    "final_train_top1_acc": 51.312,
+    "final_val_top1_acc": 96.25,
+    "final_generalization_gap": -44.938,
+    "mean_epoch_time_sec": 30.054315825303394
+}
