@@ -1,7 +1,7 @@
 """
 evaluate.py
 
-Evaluation utilities shared by training and comparison scripts.
+Evaluation utilities for CIFAR-10 experiments.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from utils.metrics import count_parameters, compute_flops
 
 def print_model_summary(
     model: nn.Module,
-    input_size: tuple[int, int, int, int],
+    input_size: tuple[int, int, int, int] = (1, 3, 32, 32),
 ) -> None:
     """
     Print trainable parameter count and GFLOPs.
@@ -38,6 +38,13 @@ def evaluate_model(
     device: torch.device,
     desc: str = "Evaluation",
 ) -> tuple[float, float, float]:
+    """
+    Evaluate a model on CIFAR-10.
+
+    Returns
+    -------
+    avg_loss, top1_acc, top5_acc
+    """
     model.eval()
     criterion = nn.CrossEntropyLoss()
 
@@ -76,25 +83,23 @@ def evaluate_model(
     return avg_loss, top1_acc, top5_acc
 
 
+@torch.no_grad()
 def validate_repvgg_deploy(
     test_loader: DataLoader,
     device: torch.device,
-    dataset: str,
     model_variant: str,
     num_classes: int,
     checkpoint_path: str | Path,
     a_multiplier: float = 1.0,
     b_multiplier: float = 2.5,
-) -> tuple[float, float]:
+) -> None:
     """
-    Validate RepVGG before and after deploy conversion.
+    Verify that RepVGG before and after deploy conversion produces
+    nearly identical outputs on a CIFAR-10 batch.
     """
     checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     model = build_repvgg(
-        dataset=dataset,
         variant=model_variant,
         num_classes=num_classes,
         deploy=False,
@@ -104,33 +109,33 @@ def validate_repvgg_deploy(
 
     state_dict = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state_dict)
+    model.eval()
 
-    print("\nEvaluating RepVGG BEFORE deploy conversion...", flush=True)
-    _, acc_before, _ = evaluate_model(
-        model=model,
-        dataloader=test_loader,
-        device=device,
-        desc="Before Deploy",
-    )
+    images, _ = next(iter(test_loader))
+    images = images.to(device)
 
-    print("\nSwitching RepVGG to deploy mode...", flush=True)
-    model.switch_to_deploy()
-    model = model.to(device)
+    train_form_output = model(images)
 
-    print("\nEvaluating RepVGG AFTER deploy conversion...", flush=True)
-    _, acc_after, _ = evaluate_model(
-        model=model,
-        dataloader=test_loader,
-        device=device,
-        desc="After Deploy",
-    )
+    deploy_model = build_repvgg(
+        variant=model_variant,
+        num_classes=num_classes,
+        deploy=False,
+        a_multiplier=a_multiplier,
+        b_multiplier=b_multiplier,
+    ).to(device)
+    deploy_model.load_state_dict(state_dict)
+    deploy_model.eval()
+    deploy_model.switch_to_deploy()
+    deploy_model = deploy_model.to(device)
 
-    print("\n" + "=" * 60)
-    print("RepVGG Deploy Validation Results")
-    print("=" * 60)
-    print(f"Before deploy accuracy: {acc_before:.2f}%")
-    print(f"After deploy accuracy : {acc_after:.2f}%")
-    print(f"Absolute difference   : {abs(acc_before - acc_after):.6f}%")
-    print("=" * 60)
+    deploy_output = deploy_model(images)
 
-    return acc_before, acc_after
+    diff = (train_form_output - deploy_output).abs()
+    max_diff = diff.max().item()
+    mean_diff = diff.mean().item()
+
+    print("\nRepVGG Deploy Consistency Check", flush=True)
+    print(f"Checkpoint : {checkpoint_path}", flush=True)
+    print(f"Variant    : {model_variant}", flush=True)
+    print(f"Max diff   : {max_diff:.10f}", flush=True)
+    print(f"Mean diff  : {mean_diff:.10f}", flush=True)

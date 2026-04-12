@@ -15,14 +15,8 @@ def str2bool(value: str) -> bool:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare trained models")
+    parser = argparse.ArgumentParser(description="Compare trained models on CIFAR-10")
 
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="cifar10",
-        choices=["cifar10", "tiny_imagenet"],
-    )
     parser.add_argument("--data_dir", type=str, default="./data")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -32,13 +26,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_val_samples", type=int, default=None)
 
-    parser.add_argument("--imagenet_image_size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
         "--repvgg_variant",
         type=str,
-        default="small",
+        default="a",
         choices=["small", "a", "b"],
     )
     parser.add_argument(
@@ -53,23 +46,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--augmentation_mode",
         type=str,
-        default="simple",
+        default="strong",
         choices=["simple", "strong"],
     )
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--autoaugment", type=str2bool, default=False)
     parser.add_argument("--mixup_alpha", type=float, default=0.0)
 
-    # add these because resolve_defaults() expects them
-    parser.add_argument("--num_classes", type=int, default=None)
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--weight_decay", type=float, default=None)
+    parser.add_argument("--num_classes", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=120)
+    parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument(
         "--scheduler",
         type=str,
-        default=None,
+        default="cosine",
         choices=["step", "cosine"],
     )
     parser.add_argument("--warmup_epochs", type=int, default=0)
@@ -81,16 +73,12 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def get_input_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
-    if args.dataset == "cifar10":
-        return (1, 3, 32, 32)
-    return (1, 3, args.imagenet_image_size, args.imagenet_image_size)
+def get_input_shape() -> tuple[int, int, int, int]:
+    return (1, 3, 32, 32)
 
 
 def get_latency_shape(args: argparse.Namespace) -> tuple[int, int, int, int]:
-    if args.dataset == "cifar10":
-        return (args.batch_size, 3, 32, 32)
-    return (args.batch_size, 3, args.imagenet_image_size, args.imagenet_image_size)
+    return (args.batch_size, 3, 32, 32)
 
 
 def build_run_tag(
@@ -106,9 +94,8 @@ def build_run_tag(
             model_tag += f"_{args.repvgg_variant}_a{args.a_multiplier:g}_b{args.b_multiplier:g}"
 
     return (
-        f"{args.dataset}_"
+        f"cifar10_"
         f"{model_tag}_"
-        f"img{args.imagenet_image_size}_"
         f"{args.augmentation_mode}_"
         f"subset{args.subset_fraction:g}"
     )
@@ -175,7 +162,7 @@ def main() -> None:
         )
 
         params = count_parameters(model)
-        flops = compute_flops(model, input_size=get_input_shape(args), device=device)
+        flops = compute_flops(model, input_size=get_input_shape(), device=device)
         latency_ms = measure_inference_latency(
             model=model,
             input_size=get_latency_shape(args),
@@ -199,7 +186,6 @@ def main() -> None:
         validate_repvgg_deploy(
             test_loader=val_loader,
             device=device,
-            dataset=args.dataset,
             model_variant=args.repvgg_variant,
             num_classes=args.num_classes,
             checkpoint_path=repvgg_ckpt,

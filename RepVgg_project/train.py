@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import sys
 import time
 from pathlib import Path
 
@@ -14,10 +13,7 @@ import torch.optim as optim
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
-from torchvision.transforms import AutoAugment, AutoAugmentPolicy
 from tqdm import tqdm
-from datasets import load_dataset
-from PIL import Image
 
 from evaluate import evaluate_model, print_model_summary
 from models.baselines import create_resnet18, create_resnet34
@@ -32,29 +28,40 @@ def str2bool(value: str) -> bool:
     return value.lower() in {"1", "true", "yes", "y"}
 
 
+class Cutout:
+    def __init__(self, n_holes: int = 1, length: int = 16) -> None:
+        self.n_holes = n_holes
+        self.length = length
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        height = img.size(1)
+        width = img.size(2)
+        mask = torch.ones((height, width), dtype=img.dtype, device=img.device)
+
+        for _ in range(self.n_holes):
+            center_y = torch.randint(0, height, (1,)).item()
+            center_x = torch.randint(0, width, (1,)).item()
+
+            y1 = max(0, center_y - self.length // 2)
+            y2 = min(height, center_y + self.length // 2)
+            x1 = max(0, center_x - self.length // 2)
+            x2 = min(width, center_x + self.length // 2)
+
+            mask[y1:y2, x1:x2] = 0
+
+        return img * mask.expand_as(img)
+
+
 def get_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-##############################################
-# ARGUMENTS
-##############################################
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train RepVGG/ResNet on CIFAR-10 or Tiny ImageNet"
+        description="Train RepVGG/ResNet on CIFAR-10"
     )
 
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="cifar10",
-        choices=["cifar10", "tiny_imagenet"],
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="./data",
-    )
+    parser.add_argument("--data_dir", type=str, default="./data")
     parser.add_argument(
         "--model",
         type=str,
@@ -65,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repvgg_variant",
         type=str,
-        default="small",
+        default="a",
         choices=["small", "a", "b"],
     )
     parser.add_argument(
@@ -75,11 +82,11 @@ def parse_args() -> argparse.Namespace:
         choices=["A0", "A1", "A2", "B0", "B1"],
     )
 
-    parser.add_argument("--num_classes", type=int, default=None)
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--weight_decay", type=float, default=None)
+    parser.add_argument("--num_classes", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=120)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
@@ -87,8 +94,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scheduler",
         type=str,
-        default=None,
-        choices=["step", "cosine"],
+        default="cosine",
+        choices=["cosine"],
     )
     parser.add_argument("--warmup_epochs", type=int, default=0)
 
@@ -99,27 +106,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_val_samples", type=int, default=None)
 
-    parser.add_argument("--imagenet_image_size", type=int, default=64)
-
     parser.add_argument("--a_multiplier", type=float, default=1.0)
     parser.add_argument("--b_multiplier", type=float, default=2.5)
 
     parser.add_argument(
         "--augmentation_mode",
         type=str,
-        default="simple",
-        choices=["simple", "strong"],
+        default="recommended",
+        choices=["simple", "recommended"],
     )
-    parser.add_argument("--label_smoothing", type=float, default=0.0)
-    parser.add_argument("--autoaugment", type=str2bool, default=False)
-    parser.add_argument("--mixup_alpha", type=float, default=0.0)
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
+    parser.add_argument("--mixup_alpha", type=float, default=0.2)
+    parser.add_argument("--cutout_holes", type=int, default=1)
+    parser.add_argument("--cutout_length", type=int, default=16)
+
+    parser.add_argument("--save_dir", type=str, default="./results")
 
     return parser.parse_args()
 
 
-##############################################
-# PRESET SYSTEM
-##############################################
 def apply_repvgg_preset(args: argparse.Namespace) -> argparse.Namespace:
     if args.repvgg_preset is None:
         return args
@@ -136,55 +141,22 @@ def apply_repvgg_preset(args: argparse.Namespace) -> argparse.Namespace:
     args.repvgg_variant = config["variant"]
     args.a_multiplier = config["a"]
     args.b_multiplier = config["b"]
-
     return args
 
 
-##############################################
-# DEFAULTS
-##############################################
 def resolve_defaults(args: argparse.Namespace) -> argparse.Namespace:
-    if args.num_classes is None:
-        args.num_classes = 10 if args.dataset == "cifar10" else 200
-
-    if args.epochs is None:
-        args.epochs = 20 if args.dataset == "cifar10" else 120
-
-    if args.lr is None:
-        args.lr = 0.01 if args.dataset == "cifar10" else 0.1
-
-    if args.weight_decay is None:
-        args.weight_decay = 5e-4 if args.dataset == "cifar10" else 1e-4
-
-    if args.scheduler is None:
-        args.scheduler = "step" if args.dataset == "cifar10" else "cosine"
-
-    if args.dataset == "cifar10":
-        args.repvgg_variant = "small"
-
-    if args.dataset == "tiny_imagenet" and args.repvgg_variant == "small":
-        args.repvgg_variant = "a"
-
-    if args.dataset == "tiny_imagenet" and args.num_classes != 200:
-        raise ValueError("Tiny ImageNet requires num_classes=200.")
-
-    if args.dataset == "cifar10" and args.repvgg_preset is not None:
-        raise ValueError("RepVGG presets are only for tiny_imagenet.")
-
-    if args.augmentation_mode == "strong":
+    if args.augmentation_mode == "simple":
+        args.label_smoothing = 0.0
+        args.mixup_alpha = 0.0
+    else:
         if args.label_smoothing == 0.0:
             args.label_smoothing = 0.1
-        if not args.autoaugment:
-            args.autoaugment = True
         if args.mixup_alpha == 0.0:
             args.mixup_alpha = 0.2
 
     return args
 
 
-##############################################
-# UTILITIES
-##############################################
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -193,11 +165,13 @@ def set_seed(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
-def get_input_size(args: argparse.Namespace) -> tuple[int, int, int, int]:
-    if args.dataset == "cifar10":
-        return (1, 3, 32, 32)
-    return (1, 3, args.imagenet_image_size, args.imagenet_image_size)
+
+def get_input_size() -> tuple[int, int, int, int]:
+    return (1, 3, 32, 32)
 
 
 def _select_subset(
@@ -224,21 +198,23 @@ def _select_subset(
 
 
 def build_cifar10_train_transform(args: argparse.Namespace) -> transforms.Compose:
-    tf_list = [
+    tf_list: list = [
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
-    ]
-
-    if args.autoaugment:
-        tf_list.append(AutoAugment(policy=AutoAugmentPolicy.CIFAR10))
-
-    tf_list.extend([
         transforms.ToTensor(),
         transforms.Normalize(
             (0.4914, 0.4822, 0.4465),
             (0.2023, 0.1994, 0.2010),
         ),
-    ])
+    ]
+
+    if args.augmentation_mode == "recommended":
+        tf_list.append(
+            Cutout(
+                n_holes=args.cutout_holes,
+                length=args.cutout_length,
+            )
+        )
 
     return transforms.Compose(tf_list)
 
@@ -253,54 +229,18 @@ def build_cifar10_val_transform() -> transforms.Compose:
     ])
 
 
-def build_tiny_imagenet_train_transform(args: argparse.Namespace) -> transforms.Compose:
-    tf_list = [
-        transforms.RandomResizedCrop(args.imagenet_image_size),
-        transforms.RandomHorizontalFlip(),
-    ]
-
-    if args.autoaugment:
-        tf_list.append(AutoAugment(policy=AutoAugmentPolicy.IMAGENET))
-
-    tf_list.extend([
-        transforms.ToTensor(),
-        transforms.Normalize(
-            (0.485, 0.456, 0.406),
-            (0.229, 0.224, 0.225),
-        ),
-    ])
-
-    return transforms.Compose(tf_list)
-
-
-def build_tiny_imagenet_val_transform(args: argparse.Namespace) -> transforms.Compose:
-    return transforms.Compose([
-        transforms.Resize(int(args.imagenet_image_size / 0.875)),
-        transforms.CenterCrop(args.imagenet_image_size),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            (0.485, 0.456, 0.406),
-            (0.229, 0.224, 0.225),
-        ),
-    ])
-
-
-##############################################
-# DATASET LOADING
-##############################################
-def get_cifar10_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
+def get_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
     train_tf = build_cifar10_train_transform(args)
     val_tf = build_cifar10_val_transform()
 
     train_ds = datasets.CIFAR10(
-        args.data_dir,
+        root=args.data_dir,
         train=True,
         download=True,
         transform=train_tf,
     )
-
     val_ds = datasets.CIFAR10(
-        args.data_dir,
+        root=args.data_dir,
         train=False,
         download=True,
         transform=val_tf,
@@ -319,268 +259,195 @@ def get_cifar10_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataL
         args.seed + 1,
     )
 
-    return (
-        DataLoader(
-            train_ds,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory and torch.cuda.is_available(),
-        ),
-        DataLoader(
-            val_ds,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory and torch.cuda.is_available(),
-        ),
-    )
-
-
-def prepare_tiny_imagenet_from_hf(data_dir: str) -> str:
-    root = Path(data_dir)
-    train_dir = root / "train"
-    val_dir = root / "val"
-
-    if train_dir.exists() and val_dir.exists():
-        log(f"Tiny ImageNet already prepared at: {root}")
-        return str(root)
-
-    log("Downloading Tiny ImageNet from Hugging Face...")
-    ds = load_dataset("zh-plus/tiny-imagenet")
-
-    root.mkdir(parents=True, exist_ok=True)
-
-    for hf_split, out_split in {"train": "train", "valid": "val"}.items():
-        split_dir = root / out_split
-        split_dir.mkdir(parents=True, exist_ok=True)
-
-        log(f"Processing split: {hf_split} -> {out_split}")
-
-        for idx, example in enumerate(ds[hf_split]):
-            img = example["image"]
-            label = ds[hf_split].features["label"].int2str(example["label"])
-
-            cls_dir = split_dir / label
-            cls_dir.mkdir(parents=True, exist_ok=True)
-
-            img.save(cls_dir / f"{idx:06d}.png")
-
-    log(f"Tiny ImageNet prepared successfully at: {root}")
-    return str(root)
-
-
-def get_tiny_imagenet_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
-    prepare_tiny_imagenet_from_hf(args.data_dir)
-
-    train_tf = build_tiny_imagenet_train_transform(args)
-    val_tf = build_tiny_imagenet_val_transform(args)
-
-    train_ds = datasets.ImageFolder(
-        Path(args.data_dir) / "train",
-        transform=train_tf,
-    )
-    val_ds = datasets.ImageFolder(
-        Path(args.data_dir) / "val",
-        transform=val_tf,
-    )
-
-    train_ds = _select_subset(
+    train_loader = DataLoader(
         train_ds,
-        args.subset_fraction,
-        args.max_train_samples,
-        args.seed,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory and torch.cuda.is_available(),
     )
-    val_ds = _select_subset(
+    val_loader = DataLoader(
         val_ds,
-        args.subset_fraction,
-        args.max_val_samples,
-        args.seed + 1,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory and torch.cuda.is_available(),
     )
-
-    return (
-        DataLoader(
-            train_ds,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory and torch.cuda.is_available(),
-        ),
-        DataLoader(
-            val_ds,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory and torch.cuda.is_available(),
-        ),
-    )
+    return train_loader, val_loader
 
 
-def get_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
-    if args.dataset == "cifar10":
-        return get_cifar10_dataloaders(args)
-    return get_tiny_imagenet_dataloaders(args)
+def mixup_data(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    alpha: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    if alpha <= 0.0:
+        return x, y, y, 1.0
+
+    lam = np.random.beta(alpha, alpha)
+    index = torch.randperm(x.size(0), device=x.device)
+    mixed_x = lam * x + (1.0 - lam) * x[index]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, float(lam)
 
 
-##############################################
-# MODEL
-##############################################
+def mixup_criterion(
+    criterion: nn.Module,
+    pred: torch.Tensor,
+    y_a: torch.Tensor,
+    y_b: torch.Tensor,
+    lam: float,
+) -> torch.Tensor:
+    return lam * criterion(pred, y_a) + (1.0 - lam) * criterion(pred, y_b)
+
+
 def build_model(args: argparse.Namespace) -> nn.Module:
     if args.model == "repvgg":
         return build_repvgg(
-            dataset=args.dataset,
             variant=args.repvgg_variant,
-            num_classes=args.num_classes,
-            deploy=False,
             a_multiplier=args.a_multiplier,
             b_multiplier=args.b_multiplier,
+            num_classes=args.num_classes,
+            deploy=False,
         )
 
     if args.model == "resnet18":
-        return create_resnet18(args.dataset, args.num_classes)
+        return create_resnet18(num_classes=args.num_classes)
 
-    return create_resnet34(args.dataset, args.num_classes)
+    if args.model == "resnet34":
+        return create_resnet34(num_classes=args.num_classes)
 
-def apply_mixup(
-    images: torch.Tensor,
-    labels: torch.Tensor,
-    alpha: float,
-    device: torch.device,
-):
-    if alpha <= 0.0:
-        return images, labels, labels, 1.0
+    raise ValueError(f"Unsupported model: {args.model}")
 
-    lam = np.random.beta(alpha, alpha)
-    batch_size = images.size(0)
-    index = torch.randperm(batch_size, device=device)
 
-    mixed_images = lam * images + (1 - lam) * images[index]
-    labels_a = labels
-    labels_b = labels[index]
+def build_optimizer(args: argparse.Namespace, model: nn.Module) -> optim.Optimizer:
+    return optim.SGD(
+        model.parameters(),
+        lr=args.lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+    )
 
-    return mixed_images, labels_a, labels_b, lam
 
-def mixup_loss(
-    criterion: nn.Module,
-    outputs: torch.Tensor,
-    labels_a: torch.Tensor,
-    labels_b: torch.Tensor,
-    lam: float,
-):
-    return lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+def build_scheduler(
+    args: argparse.Namespace,
+    optimizer: optim.Optimizer,
+) -> optim.lr_scheduler._LRScheduler:
+    return optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+    )
+
+
+def build_run_name(args: argparse.Namespace) -> str:
+    if args.model == "repvgg":
+        if args.repvgg_preset is not None:
+            model_tag = f"repvgg_{args.repvgg_preset}"
+        else:
+            model_tag = (
+                f"repvgg_{args.repvgg_variant}"
+                f"_a{args.a_multiplier:g}"
+                f"_b{args.b_multiplier:g}"
+            )
+    else:
+        model_tag = args.model
+
+    return (
+        f"cifar10_"
+        f"{model_tag}_"
+        f"{args.augmentation_mode}_"
+        f"subset{args.subset_fraction:g}"
+    )
+
+
+def get_save_paths(args: argparse.Namespace) -> dict[str, Path]:
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    run_name = build_run_name(args)
+
+    return {
+        "checkpoint": save_dir / f"{run_name}_best.pth",
+        "history": save_dir / f"{run_name}_history.json",
+        "final": save_dir / f"{run_name}_last.pth",
+    }
+
+
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler._LRScheduler,
+    epoch: int,
+    best_val_top1: float,
+    args: argparse.Namespace,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "best_val_top1": best_val_top1,
+            "args": vars(args),
+        },
+        path,
+    )
+
 
 def train_one_epoch(
     model: nn.Module,
-    loader: DataLoader,
+    train_loader: DataLoader,
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
     scaler: GradScaler,
-    amp_enabled: bool,
-    mixup_alpha: float = 0.0,
+    args: argparse.Namespace,
+    epoch: int,
 ) -> tuple[float, float]:
     model.train()
 
-    total_loss = 0.0
-    correct = 0
+    running_loss = 0.0
+    correct_top1 = 0
     total = 0
 
-    pbar = tqdm(loader)
+    progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]", leave=True)
 
-    for images, labels in pbar:
+    for images, labels in progress_bar:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
+        mixed_images, y_a, y_b, lam = mixup_data(
+            images,
+            labels,
+            alpha=args.mixup_alpha,
+        )
+
         optimizer.zero_grad(set_to_none=True)
 
-        use_mixup = mixup_alpha > 0.0
-
-        if use_mixup:
-            images, labels_a, labels_b, lam = apply_mixup(
-                images, labels, mixup_alpha, device
-            )
-
-        with autocast(device_type=device.type, enabled=amp_enabled):
-            outputs = model(images)
-
-            if use_mixup:
-                loss = mixup_loss(criterion, outputs, labels_a, labels_b, lam)
-            else:
-                loss = criterion(outputs, labels)
+        with autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
+            outputs = model(mixed_images)
+            loss = mixup_criterion(criterion, outputs, y_a, y_b, lam)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
-        total_loss += loss.item() * images.size(0)
-
-        pred = outputs.argmax(dim=1)
-
-        if use_mixup:
-            correct += (
-                lam * pred.eq(labels_a).sum().item()
-                + (1 - lam) * pred.eq(labels_b).sum().item()
-            )
-        else:
-            correct += pred.eq(labels).sum().item()
-
+        running_loss += loss.item() * images.size(0)
         total += labels.size(0)
 
-        pbar.set_postfix(
-            loss=f"{total_loss / total:.4f}",
-            acc=f"{100.0 * correct / total:.2f}%",
-            lr=f"{optimizer.param_groups[0]['lr']:.5f}",
-        )
+        _, predicted = outputs.max(dim=1)
+        correct_top1 += predicted.eq(labels).sum().item()
 
-    return total_loss / total, 100.0 * correct / total
+        avg_loss = running_loss / total
+        top1 = 100.0 * correct_top1 / total
+        progress_bar.set_postfix(loss=f"{avg_loss:.4f}", top1=f"{top1:.2f}%")
 
+    avg_loss = running_loss / total
+    top1_acc = 100.0 * correct_top1 / total
+    return avg_loss, top1_acc
 
-##############################################
-# SCHEDULER
-##############################################
-def make_scheduler(
-    optimizer: optim.Optimizer,
-    args: argparse.Namespace,
-):
-    if args.scheduler == "cosine":
-        main_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=max(1, args.epochs - args.warmup_epochs),
-            eta_min=0.0,
-        )
-    else:
-        step_size = max(1, args.epochs // 2)
-        main_scheduler = optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=step_size,
-            gamma=0.1,
-        )
-
-    if args.warmup_epochs <= 0:
-        return main_scheduler
-
-    warmup_scheduler = optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=1e-3,
-        end_factor=1.0,
-        total_iters=args.warmup_epochs,
-    )
-
-    return optim.lr_scheduler.SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, main_scheduler],
-        milestones=[args.warmup_epochs],
-    )
-
-def save_checkpoint(model: nn.Module, save_path: Path) -> None:
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), save_path)
-
-
-def save_training_history(history: dict, save_path: Path) -> None:
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "w", encoding="utf-8") as f:
-        json.dump(history, f, indent=4)
 
 def main() -> None:
     args = parse_args()
@@ -588,166 +455,134 @@ def main() -> None:
     args = resolve_defaults(args)
 
     set_seed(args.seed)
-
     device = get_device()
-    amp_enabled = bool(args.amp and device.type == "cuda")
 
-    model_tag = args.model
-    if args.model == "repvgg":
-        if args.repvgg_preset is not None:
-            model_tag += f"_{args.repvgg_preset}"
-        else:
-            model_tag += f"_{args.repvgg_variant}_a{args.a_multiplier:g}_b{args.b_multiplier:g}"
-
-    run_tag = (
-        f"{args.dataset}_"
-        f"{model_tag}_"
-        f"img{args.imagenet_image_size}_"
-        f"{args.augmentation_mode}_"
-        f"subset{args.subset_fraction:g}"
-    )
-
-    checkpoint_dir = Path("checkpoints")
-    results_dir = Path("results")
-
-    best_model_path = checkpoint_dir / f"{run_tag}_best.pth"
-    last_model_path = checkpoint_dir / f"{run_tag}_last.pth"
-    history_path = results_dir / f"{run_tag}_history.json"
-
-    log("Starting training script...")
-    log(f"Dataset: {args.dataset}")
-    log(f"Data dir: {args.data_dir}")
+    log(f"Using device: {device}")
+    log(f"Dataset: CIFAR-10")
     log(f"Model: {args.model}")
-
     if args.model == "repvgg":
-        if args.repvgg_preset is not None:
-            log(f"RepVGG preset: {args.repvgg_preset}")
+        log(f"RepVGG preset: {args.repvgg_preset}")
         log(f"RepVGG variant: {args.repvgg_variant}")
-        if args.dataset == "tiny_imagenet":
-            log(f"Width multipliers: a={args.a_multiplier}, b={args.b_multiplier}")
-
+        log(f"A multiplier: {args.a_multiplier}")
+        log(f"B multiplier: {args.b_multiplier}")
+    log(f"Epochs: {args.epochs}")
+    log(f"Batch size: {args.batch_size}")
+    log(f"Scheduler: {args.scheduler}")
     log(f"Augmentation mode: {args.augmentation_mode}")
-    log(f"AutoAugment: {args.autoaugment}")
     log(f"Label smoothing: {args.label_smoothing}")
     log(f"Mixup alpha: {args.mixup_alpha}")
 
-    log(f"Using device: {device}")
-    log(f"AMP enabled: {amp_enabled}")
-    log(f"Epochs: {args.epochs}")
-    log(f"Batch size: {args.batch_size}")
-    log(f"Learning rate: {args.lr}")
-    log(f"Weight decay: {args.weight_decay}")
-    log(f"Scheduler: {args.scheduler}")
-    log(f"Warmup epochs: {args.warmup_epochs}")
-    log(f"Subset fraction: {args.subset_fraction}")
-
     train_loader, val_loader = get_dataloaders(args)
 
-    log(f"Train batches: {len(train_loader)}")
-    log(f"Val batches: {len(val_loader)}")
-
     model = build_model(args).to(device)
-
-    log("Model summary:")
-    print_model_summary(model, input_size=get_input_size(args))
+    print_model_summary(model, input_size=get_input_size())
 
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    optimizer = build_optimizer(args, model)
+    scheduler = build_scheduler(args, optimizer)
+    scaler = GradScaler(enabled=args.amp and device.type == "cuda")
 
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=args.lr,
-        momentum=args.momentum,
-        weight_decay=args.weight_decay,
-    )
+    save_paths = get_save_paths(args)
 
-    scheduler = make_scheduler(optimizer, args)
-    scaler = GradScaler(device=device.type, enabled=amp_enabled)
-
-    history = {
-        "dataset": args.dataset,
-        "data_dir": args.data_dir,
-        "model_name": args.model,
-        "repvgg_variant": args.repvgg_variant if args.model == "repvgg" else None,
-        "repvgg_preset": args.repvgg_preset if args.model == "repvgg" else None,
+    history: dict[str, list[float] | float | str | int] = {
+        "dataset": "CIFAR-10",
+        "model": args.model,
+        "repvgg_preset": args.repvgg_preset,
+        "repvgg_variant": args.repvgg_variant,
+        "a_multiplier": args.a_multiplier,
+        "b_multiplier": args.b_multiplier,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "momentum": args.momentum,
+        "scheduler": args.scheduler,
         "augmentation_mode": args.augmentation_mode,
-        "autoaugment": args.autoaugment,
         "label_smoothing": args.label_smoothing,
         "mixup_alpha": args.mixup_alpha,
         "subset_fraction": args.subset_fraction,
         "train_loss": [],
-        "train_acc": [],
+        "train_top1": [],
         "val_loss": [],
-        "val_acc": [],
-        "val_top5_acc": [],
-        "learning_rate": [],
+        "val_top1": [],
+        "val_top5": [],
+        "lr_history": [],
         "epoch_time_sec": [],
+        "best_val_top1": 0.0,
     }
 
-    best_val_acc = 0.0
-
-    log("Training starts now.\n")
+    best_val_top1 = 0.0
 
     for epoch in range(1, args.epochs + 1):
-        log(f"Starting epoch {epoch}/{args.epochs}...")
-        start_time = time.time()
+        epoch_start = time.time()
 
-        train_loss, train_acc = train_one_epoch(
+        train_loss, train_top1 = train_one_epoch(
             model=model,
-            loader=train_loader,
+            train_loader=train_loader,
             criterion=criterion,
             optimizer=optimizer,
             device=device,
             scaler=scaler,
-            amp_enabled=amp_enabled,
-            mixup_alpha=args.mixup_alpha,
+            args=args,
+            epoch=epoch,
         )
 
-        log(f"Finished training epoch {epoch}, starting evaluation...")
-
-        val_loss, val_acc, val_top5_acc = evaluate_model(
+        val_loss, val_top1, val_top5 = evaluate_model(
             model=model,
             dataloader=val_loader,
             device=device,
-            desc=f"Epoch {epoch}/{args.epochs} [Val]",
+            desc=f"Epoch {epoch} [Val]",
         )
 
-        epoch_time = time.time() - start_time
+        scheduler.step()
+        epoch_time = time.time() - epoch_start
         current_lr = optimizer.param_groups[0]["lr"]
 
         history["train_loss"].append(train_loss)
-        history["train_acc"].append(train_acc)
+        history["train_top1"].append(train_top1)
         history["val_loss"].append(val_loss)
-        history["val_acc"].append(val_acc)
-        history["val_top5_acc"].append(val_top5_acc)
-        history["learning_rate"].append(current_lr)
+        history["val_top1"].append(val_top1)
+        history["val_top5"].append(val_top5)
+        history["lr_history"].append(current_lr)
         history["epoch_time_sec"].append(epoch_time)
 
         log(
-            f"\nEpoch [{epoch}/{args.epochs}] Summary | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Train Acc: {train_acc:.2f}% | "
-            f"Val Loss: {val_loss:.4f} | "
-            f"Val Acc (Top-1): {val_acc:.2f}% | "
-            f"Val Acc (Top-5): {val_top5_acc:.2f}% | "
-            f"LR: {current_lr:.6f} | "
-            f"Time: {epoch_time:.2f}s"
+            f"Epoch {epoch:03d} | "
+            f"train_loss={train_loss:.4f} | train_top1={train_top1:.2f}% | "
+            f"val_loss={val_loss:.4f} | val_top1={val_top1:.2f}% | "
+            f"val_top5={val_top5:.2f}% | lr={current_lr:.6f}"
         )
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            save_checkpoint(model, best_model_path)
-            log(f"Best model saved with validation accuracy: {best_val_acc:.2f}%")
+        if val_top1 > best_val_top1:
+            best_val_top1 = val_top1
+            history["best_val_top1"] = best_val_top1
 
-        save_checkpoint(model, last_model_path)
-        save_training_history(history, history_path)
+            save_checkpoint(
+                path=save_paths["checkpoint"],
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                best_val_top1=best_val_top1,
+                args=args,
+            )
+            log(f"[Saved best checkpoint] {save_paths['checkpoint']}")
 
-        scheduler.step()
-        log("")
+        with open(save_paths["history"], "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
 
-    log(f"Training completed. Best validation accuracy: {best_val_acc:.2f}%")
-    log(f"Best checkpoint: {best_model_path}")
-    log(f"Last checkpoint: {last_model_path}")
-    log(f"History file: {history_path}")
+    save_checkpoint(
+        path=save_paths["final"],
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=args.epochs,
+        best_val_top1=best_val_top1,
+        args=args,
+    )
+    log(f"[Saved final checkpoint] {save_paths['final']}")
+    log(f"[Saved history] {save_paths['history']}")
+    log(f"Best validation Top-1: {best_val_top1:.2f}%")
 
 
 if __name__ == "__main__":

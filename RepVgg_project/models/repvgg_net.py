@@ -1,13 +1,7 @@
 """
 repvgg_net.py
 
-RepVGG model definitions for both CIFAR-10 and ImageNet-style experiments.
-
-Key idea
---------
-- CIFAR-10: keep a small, lightweight adaptation for 32x32 inputs.
-- ImageNet: expose paper-style depth profiles so the same codebase can switch
-  between small local experiments and larger HPC runs.
+RepVGG model definitions for CIFAR-10 experiments only.
 """
 
 from __future__ import annotations
@@ -22,39 +16,14 @@ from models.repvgg_block import RepVGGBlock
 
 @dataclass(frozen=True)
 class RepVGGConfig:
-    """
-    Configuration for a RepVGG variant.
-
-    stage_channels:
-        [stem, stage1, stage2, stage3, stage4]
-    num_blocks:
-        Number of blocks in stages 1-4.
-    stem_stride:
-        Stride of the very first block.
-    stage1_stride:
-        Stride of stage 1.
-    """
     stage_channels: list[int]
     num_blocks: list[int]
     stem_stride: int
     stage1_stride: int
-    num_classes: int = 1000
+    num_classes: int = 10
 
 
 class RepVGG(nn.Module):
-    """
-    Flexible RepVGG classifier.
-
-    This class supports both:
-    - CIFAR-style experiments (small inputs, lighter architecture)
-    - ImageNet-style experiments (paper-inspired depth/width)
-
-    Architecture
-    ------------
-    stage0 (stem) -> stage1 -> stage2 -> stage3 -> stage4
-    -> global average pooling -> linear classifier
-    """
-
     def __init__(
         self,
         config: RepVGGConfig,
@@ -140,9 +109,6 @@ class RepVGG(nn.Module):
         return x
 
     def switch_to_deploy(self) -> None:
-        """
-        Convert every RepVGG block into its deploy-time single-conv form.
-        """
         for module in self.modules():
             if isinstance(module, RepVGGBlock):
                 module.switch_to_deploy()
@@ -152,10 +118,6 @@ def _paper_style_stage_channels(
     a_multiplier: float,
     b_multiplier: float,
 ) -> list[int]:
-    """
-    Paper-style width rule:
-    [min(64, 64a), 64a, 128a, 256a, 512b]
-    """
     stem = min(64, int(round(64 * a_multiplier)))
     stage1 = int(round(64 * a_multiplier))
     stage2 = int(round(128 * a_multiplier))
@@ -165,14 +127,6 @@ def _paper_style_stage_channels(
 
 
 def create_repvgg_small(num_classes: int = 10, deploy: bool = False) -> RepVGG:
-    """
-    Deliberately scaled-down CIFAR-10 RepVGG.
-
-    Differences from the paper:
-    - depth: [2, 2, 2, 2] instead of paper-style [2, 4, 14, 1] / [4, 6, 16, 1]
-    - width: [32, 32, 64, 128, 256]
-    - stem stride 1 for 32x32 inputs
-    """
     config = RepVGGConfig(
         stage_channels=[32, 32, 64, 128, 256],
         num_blocks=[2, 2, 2, 2],
@@ -183,88 +137,64 @@ def create_repvgg_small(num_classes: int = 10, deploy: bool = False) -> RepVGG:
     return RepVGG(config=config, deploy=deploy)
 
 
-def create_repvgg_imagenet_a(
-    num_classes: int = 1000,
+def create_repvgg_cifar_a(
+    num_classes: int = 10,
     deploy: bool = False,
     a_multiplier: float = 1.0,
     b_multiplier: float = 2.5,
 ) -> RepVGG:
-    """
-    ImageNet-style RepVGG-A depth profile:
-    [2, 4, 14, 1]
-    """
     config = RepVGGConfig(
         stage_channels=_paper_style_stage_channels(a_multiplier, b_multiplier),
         num_blocks=[2, 4, 14, 1],
-        stem_stride=2,
-        stage1_stride=2,
+        stem_stride=1,
+        stage1_stride=1,
         num_classes=num_classes,
     )
     return RepVGG(config=config, deploy=deploy)
 
 
-def create_repvgg_imagenet_b(
-    num_classes: int = 1000,
+def create_repvgg_cifar_b(
+    num_classes: int = 10,
     deploy: bool = False,
     a_multiplier: float = 1.0,
     b_multiplier: float = 2.5,
 ) -> RepVGG:
-    """
-    ImageNet-style RepVGG-B depth profile:
-    [4, 6, 16, 1]
-    """
     config = RepVGGConfig(
         stage_channels=_paper_style_stage_channels(a_multiplier, b_multiplier),
         num_blocks=[4, 6, 16, 1],
-        stem_stride=2,
-        stage1_stride=2,
+        stem_stride=1,
+        stage1_stride=1,
         num_classes=num_classes,
     )
     return RepVGG(config=config, deploy=deploy)
 
 
 def build_repvgg(
-    dataset: str,
     variant: str,
     num_classes: int,
     deploy: bool = False,
     a_multiplier: float = 1.0,
     b_multiplier: float = 2.5,
 ) -> RepVGG:
-    """
-    Unified RepVGG factory.
-
-    Supported combinations
-    ----------------------
-    CIFAR-10:
-        variant = "small"
-
-    Tiny ImageNet:
-        variant = "a" or "b"
-    """
-    dataset = dataset.lower()
     variant = variant.lower()
 
-    if dataset == "cifar10":
-        if variant != "small":
-            raise ValueError("For CIFAR-10, RepVGG variant must be 'small'")
+    if variant == "small":
         return create_repvgg_small(num_classes=num_classes, deploy=deploy)
 
-    if dataset == "tiny_imagenet":
-        if variant == "a":
-            return create_repvgg_imagenet_a(
-                num_classes=num_classes,
-                deploy=deploy,
-                a_multiplier=a_multiplier,
-                b_multiplier=b_multiplier,
-            )
-        if variant == "b":
-            return create_repvgg_imagenet_b(
-                num_classes=num_classes,
-                deploy=deploy,
-                a_multiplier=a_multiplier,
-                b_multiplier=b_multiplier,
-            )
-        raise ValueError("For Tiny ImageNet, RepVGG variant must be 'a' or 'b'")
+    if variant == "a":
+        return create_repvgg_cifar_a(
+            num_classes=num_classes,
+            deploy=deploy,
+            a_multiplier=a_multiplier,
+            b_multiplier=b_multiplier,
+        )
 
-    raise ValueError(f"Unsupported dataset: {dataset}")
+    if variant == "b":
+        return create_repvgg_cifar_b(
+            num_classes=num_classes,
+            deploy=deploy,
+            a_multiplier=a_multiplier,
+            b_multiplier=b_multiplier,
+        )
+
+    raise ValueError("RepVGG variant must be 'small', 'a', or 'b'")
