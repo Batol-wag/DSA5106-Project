@@ -31,6 +31,16 @@ INPUT_SIZE = (1, 3, 32, 32)
 # ----------------------------
 MODEL_KEYS = ["A0", "A1", "A2", "B0", "B1", "resnet18", "resnet34"]
 
+TEACHER_CKPT = "./teacher_resnet18.pth"
+
+def build_teacher():
+    model = create_resnet18(10)
+    return model
+
+def load_teacher(model, path):
+    ckpt = torch.load(path, map_location="cpu")
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    return model
 
 def repvgg_model_convert(model:torch.nn.Module, save_path=None, do_copy=True):
     if do_copy:
@@ -207,8 +217,16 @@ def main():
             model_deploy = repvgg_model_convert(model, do_copy=True)
             results.append(benchmark(key, model_deploy, deploy=True))
 
+    # -----------------------------
+    # TEACHER MODEL (ResNet-18)
+    # -----------------------------
+    teacher = build_teacher()
+    teacher = load_teacher(teacher, TEACHER_CKPT)
+
+    results.append(benchmark("teacher_resnet18", teacher, deploy=False))
+
     df = pd.DataFrame(results)
-    out =  "./reproduce_benchmark_results.csv"
+    out =  "./results.csv"
     df.to_csv(out, index=False)
 
     print(f"\n✅ Saved: {out}")
