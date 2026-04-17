@@ -1,7 +1,19 @@
 """
 evaluate.py
 
-Evaluation utilities for CIFAR-10 experiments.
+This file contains evaluation utilities for CIFAR-10 experiments.
+It provides functions to:
+
+1. Print model complexity statistics such as trainable parameters
+   and estimated GFLOPs.
+
+2. Evaluate a trained model on a dataset using loss, Top-1 accuracy,
+   and Top-5 accuracy.
+
+3. Validate RepVGG structural re-parameterization by comparing model
+   outputs before and after switching to deploy mode.
+
+Used during testing, benchmarking, and final result reporting.
 """
 
 from __future__ import annotations
@@ -22,13 +34,14 @@ def print_model_summary(
     input_size: tuple[int, int, int, int] = (1, 3, 32, 32),
 ) -> None:
     """
-    Print trainable parameter count and GFLOPs.
+    Print trainable parameter count and estimated GFLOPs.
     """
     params = count_parameters(model)
     flops = compute_flops(model, input_size=input_size)
-    flops_str = f"{flops:.4f} GFLOPs" if flops is not None else "N/A (install thop)"
+    flops_text = f"{flops:.4f} GFLOPs" if flops is not None else "N/A (install thop)"
+
     print(f"  Parameters : {params:,}", flush=True)
-    print(f"  GFLOPs     : {flops_str}", flush=True)
+    print(f"  GFLOPs     : {flops_text}", flush=True)
 
 
 @torch.no_grad()
@@ -39,7 +52,7 @@ def evaluate_model(
     desc: str = "Evaluation",
 ) -> tuple[float, float, float]:
     """
-    Evaluate a model on CIFAR-10.
+    Evaluate model performance on CIFAR-10.
 
     Returns
     -------
@@ -48,10 +61,10 @@ def evaluate_model(
     model.eval()
     criterion = nn.CrossEntropyLoss()
 
-    running_loss = 0.0
+    total_loss = 0.0
     correct_top1 = 0
     correct_top5 = 0
-    total = 0
+    total_samples = 0
 
     progress_bar = tqdm(dataloader, desc=desc, leave=True)
 
@@ -62,23 +75,29 @@ def evaluate_model(
         outputs = model(images)
         loss = criterion(outputs, labels)
 
-        running_loss += loss.item() * images.size(0)
-        total += labels.size(0)
+        batch_size = images.size(0)
 
-        _, predicted = outputs.max(dim=1)
-        correct_top1 += predicted.eq(labels).sum().item()
+        total_loss += loss.item() * batch_size
+        total_samples += batch_size
+
+        _, predictions = outputs.max(dim=1)
+        correct_top1 += predictions.eq(labels).sum().item()
 
         top_k = min(5, outputs.size(1))
-        _, top5_preds = outputs.topk(top_k, dim=1, largest=True, sorted=True)
-        correct_top5 += top5_preds.eq(labels.unsqueeze(1)).any(dim=1).sum().item()
+        _, top5_predictions = outputs.topk(top_k, dim=1, largest=True, sorted=True)
+        correct_top5 += top5_predictions.eq(labels.unsqueeze(1)).any(dim=1).sum().item()
 
-        current_loss = running_loss / total
-        current_top1 = 100.0 * correct_top1 / total
-        progress_bar.set_postfix(loss=f"{current_loss:.4f}", top1=f"{current_top1:.2f}%")
+        avg_loss = total_loss / total_samples
+        top1_acc = 100.0 * correct_top1 / total_samples
 
-    avg_loss = running_loss / total
-    top1_acc = 100.0 * correct_top1 / total
-    top5_acc = 100.0 * correct_top5 / total
+        progress_bar.set_postfix(
+            loss=f"{avg_loss:.4f}",
+            top1=f"{top1_acc:.2f}%",
+        )
+
+    avg_loss = total_loss / total_samples
+    top1_acc = 100.0 * correct_top1 / total_samples
+    top5_acc = 100.0 * correct_top5 / total_samples
 
     return avg_loss, top1_acc, top5_acc
 
@@ -94,8 +113,8 @@ def validate_repvgg_deploy(
     b_multiplier: float = 2.5,
 ) -> None:
     """
-    Verify that RepVGG before and after deploy conversion produces
-    nearly identical outputs on a CIFAR-10 batch.
+    Verify that RepVGG outputs before and after deploy conversion
+    remain nearly identical on a sample batch.
     """
     checkpoint_path = Path(checkpoint_path)
 
@@ -114,7 +133,7 @@ def validate_repvgg_deploy(
     images, _ = next(iter(test_loader))
     images = images.to(device)
 
-    train_form_output = model(images)
+    train_output = model(images)
 
     deploy_model = build_repvgg(
         variant=model_variant,
@@ -123,6 +142,7 @@ def validate_repvgg_deploy(
         a_multiplier=a_multiplier,
         b_multiplier=b_multiplier,
     ).to(device)
+
     deploy_model.load_state_dict(state_dict)
     deploy_model.eval()
     deploy_model.switch_to_deploy()
@@ -130,9 +150,9 @@ def validate_repvgg_deploy(
 
     deploy_output = deploy_model(images)
 
-    diff = (train_form_output - deploy_output).abs()
-    max_diff = diff.max().item()
-    mean_diff = diff.mean().item()
+    difference = (train_output - deploy_output).abs()
+    max_diff = difference.max().item()
+    mean_diff = difference.mean().item()
 
     print("\nRepVGG Deploy Consistency Check", flush=True)
     print(f"Checkpoint : {checkpoint_path}", flush=True)

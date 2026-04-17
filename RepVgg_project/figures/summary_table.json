@@ -1,0 +1,72 @@
+[
+    {
+        "model": "RepVGG-A0",
+        "epochs": 30,
+        "final_train_loss": 0.9554983974647522,
+        "final_val_loss": 0.35647585802078247,
+        "final_train_top1": 49.024,
+        "final_val_top1": 92.87,
+        "best_val_top1": 92.9,
+        "final_val_top5": 99.75
+    },
+    {
+        "model": "RepVGG-A1",
+        "epochs": 30,
+        "final_train_loss": 0.9296855273246765,
+        "final_val_loss": 0.3297968269824982,
+        "final_train_top1": 49.87,
+        "final_val_top1": 93.68,
+        "best_val_top1": 93.68,
+        "final_val_top5": 99.87
+    },
+    {
+        "model": "RepVGG-A2",
+        "epochs": 30,
+        "final_train_loss": 0.9108681413078308,
+        "final_val_loss": 0.3298302445411682,
+        "final_train_top1": 50.402,
+        "final_val_top1": 94.1,
+        "best_val_top1": 94.1,
+        "final_val_top5": 99.77
+    },
+    {
+        "model": "RepVGG-B0",
+        "epochs": 30,
+        "final_train_loss": 0.9328601281356812,
+        "final_val_loss": 0.3359880908966065,
+        "final_train_top1": 49.74,
+        "final_val_top1": 93.5,
+        "best_val_top1": 93.5,
+        "final_val_top5": 99.86
+    },
+    {
+        "model": "RepVGG-B1",
+        "epochs": 30,
+        "final_train_loss": 0.8934903382873535,
+        "final_val_loss": 0.29771029453277587,
+        "final_train_top1": 50.752,
+        "final_val_top1": 94.77,
+        "best_val_top1": 94.77,
+        "final_val_top5": 99.84
+    },
+    {
+        "model": "ResNet-18",
+        "epochs": 30,
+        "final_train_loss": 0.9277746187400818,
+        "final_val_loss": 0.36042389109134676,
+        "final_train_top1": 50.008,
+        "final_val_top1": 93.36,
+        "best_val_top1": 93.36,
+        "final_val_top5": 99.78
+    },
+    {
+        "model": "ResNet-34",
+        "epochs": 30,
+        "final_train_loss": 0.9189245531082153,
+        "final_val_loss": 0.3388399924278259,
+        "final_train_top1": 50.084,
+        "final_val_top1": 93.55,
+        "best_val_top1": 93.55,
+        "final_val_top5": 99.84
+    }
+]

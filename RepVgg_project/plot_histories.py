@@ -1,29 +1,34 @@
 """
-plot_histories.py
+plot_results.py
 
-Plot training histories for CIFAR-10 experiments.
+Generate training result figures and summary statistics for all models.
 
-This version is aligned with the cleaned CIFAR-10-only training pipeline
-and the preset-based checkpoint/history naming scheme.
+This script reads saved training history JSON files and creates separate
+plots for each trained model.
 
-Expected history files
-----------------------
-Results directory should contain files like:
+Main tasks performed:
 
-- cifar10_repvgg_A0_strong_subset1_history.json
-- cifar10_repvgg_A1_strong_subset1_history.json
-- cifar10_repvgg_A2_strong_subset1_history.json
-- cifar10_repvgg_B0_strong_subset1_history.json
-- cifar10_repvgg_B1_strong_subset1_history.json
-- cifar10_resnet18_strong_subset1_history.json
-- cifar10_resnet34_strong_subset1_history.json
+1. Load history files saved after training.
 
-Generated plots
----------------
-- train_loss_comparison.png
-- val_loss_comparison.png
-- val_top1_comparison.png
-- final_top1_comparison.png
+2. Search for expected runs:
+   - RepVGG-A0
+   - RepVGG-A1
+   - RepVGG-A2
+   - RepVGG-B0
+   - RepVGG-B1
+   - ResNet-18
+   - ResNet-34
+
+3. Create three plots for each model:
+   - Training vs validation loss
+   - Training vs validation Top-1 accuracy
+   - Validation Top-5 accuracy
+
+4. Save plots into separate folders for each model.
+
+5. Generate a summary table containing final and best metrics.
+
+Used for report figures, model comparison, and experiment analysis.
 """
 
 from __future__ import annotations
@@ -36,8 +41,11 @@ import matplotlib.pyplot as plt
 
 
 def load_history(path: Path) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """
+    Load one training history JSON file.
+    """
+    with open(path, "r", encoding="utf-8") as file:
+        return json.load(file)
 
 
 def build_history_path(
@@ -46,42 +54,41 @@ def build_history_path(
     augmentation_mode: str,
     subset_fraction: float,
 ) -> Path:
+    """
+    Build expected history file path for one model run.
+    """
     subset_tag = f"subset{subset_fraction:g}"
     filename = f"cifar10_{model_name}_{augmentation_mode}_{subset_tag}_history.json"
+
     return results_dir / filename
 
 
-def get_expected_runs(run_b_variants: bool) -> list[tuple[str, str]]:
-    runs = [
+def get_expected_runs() -> list[tuple[str, str]]:
+    """
+    Return display names and internal file names for expected models.
+    """
+    return [
         ("RepVGG-A0", "repvgg_A0"),
         ("RepVGG-A1", "repvgg_A1"),
         ("RepVGG-A2", "repvgg_A2"),
-    ]
-
-    if run_b_variants:
-        runs.extend([
-            ("RepVGG-B0", "repvgg_B0"),
-            ("RepVGG-B1", "repvgg_B1"),
-        ])
-
-    runs.extend([
+        ("RepVGG-B0", "repvgg_B0"),
+        ("RepVGG-B1", "repvgg_B1"),
         ("ResNet-18", "resnet18"),
         ("ResNet-34", "resnet34"),
-    ])
-
-    return runs
+    ]
 
 
 def load_histories(
     results_dir: Path,
     augmentation_mode: str,
     subset_fraction: float,
-    run_b_variants: bool,
 ) -> dict[str, dict]:
+    """
+    Load all available history files.
+    """
     histories: dict[str, dict] = {}
-    expected_runs = get_expected_runs(run_b_variants)
 
-    for display_name, model_name in expected_runs:
+    for display_name, model_name in get_expected_runs():
         history_path = build_history_path(
             results_dir=results_dir,
             model_name=model_name,
@@ -96,27 +103,52 @@ def load_histories(
         histories[display_name] = load_history(history_path)
 
     if not histories:
-        raise FileNotFoundError(
-            "No history files were found. Check results_dir, augmentation_mode, and subset_fraction."
-        )
+        raise FileNotFoundError("No history files found.")
 
     return histories
 
 
-def plot_train_loss(histories: dict[str, dict], save_path: Path) -> None:
-    plt.figure(figsize=(9, 5))
+def safe_name(name: str) -> str:
+    """
+    Convert model name into a filesystem-safe format.
+    """
+    return name.lower().replace(" ", "_").replace("-", "_")
 
-    for model_name, history in histories.items():
-        values = history.get("train_loss", [])
-        if not values:
-            continue
 
-        epochs = range(1, len(values) + 1)
-        plt.plot(epochs, values, label=model_name)
+def plot_loss(
+    model_name: str,
+    history: dict,
+    save_path: Path,
+) -> None:
+    """
+    Plot training and validation loss.
+    """
+    train_loss = history.get("train_loss", [])
+    val_loss = history.get("val_loss", [])
+
+    if not train_loss and not val_loss:
+        print(f"[SKIP] {model_name} missing loss history")
+        return
+
+    plt.figure(figsize=(8, 5))
+
+    if train_loss:
+        plt.plot(
+            range(1, len(train_loss) + 1),
+            train_loss,
+            label="Train Loss",
+        )
+
+    if val_loss:
+        plt.plot(
+            range(1, len(val_loss) + 1),
+            val_loss,
+            label="Validation Loss",
+        )
 
     plt.xlabel("Epoch")
-    plt.ylabel("Train Loss")
-    plt.title("Training Loss on CIFAR-10")
+    plt.ylabel("Loss")
+    plt.title(f"{model_name} - Loss")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -124,20 +156,40 @@ def plot_train_loss(histories: dict[str, dict], save_path: Path) -> None:
     plt.close()
 
 
-def plot_val_loss(histories: dict[str, dict], save_path: Path) -> None:
-    plt.figure(figsize=(9, 5))
+def plot_top1(
+    model_name: str,
+    history: dict,
+    save_path: Path,
+) -> None:
+    """
+    Plot training and validation Top-1 accuracy.
+    """
+    train_top1 = history.get("train_top1", [])
+    val_top1 = history.get("val_top1", [])
 
-    for model_name, history in histories.items():
-        values = history.get("val_loss", [])
-        if not values:
-            continue
+    if not train_top1 and not val_top1:
+        print(f"[SKIP] {model_name} missing Top-1 history")
+        return
 
-        epochs = range(1, len(values) + 1)
-        plt.plot(epochs, values, label=model_name)
+    plt.figure(figsize=(8, 5))
+
+    if train_top1:
+        plt.plot(
+            range(1, len(train_top1) + 1),
+            train_top1,
+            label="Train Top-1",
+        )
+
+    if val_top1:
+        plt.plot(
+            range(1, len(val_top1) + 1),
+            val_top1,
+            label="Validation Top-1",
+        )
 
     plt.xlabel("Epoch")
-    plt.ylabel("Validation Loss")
-    plt.title("Validation Loss on CIFAR-10")
+    plt.ylabel("Top-1 Accuracy (%)")
+    plt.title(f"{model_name} - Top-1 Accuracy")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -145,24 +197,31 @@ def plot_val_loss(histories: dict[str, dict], save_path: Path) -> None:
     plt.close()
 
 
-def plot_val_top1(histories: dict[str, dict], save_path: Path) -> None:
-    plt.figure(figsize=(9, 5))
+def plot_top5(
+    model_name: str,
+    history: dict,
+    save_path: Path,
+) -> None:
+    """
+    Plot validation Top-5 accuracy.
+    """
+    val_top5 = history.get("val_top5", [])
 
-    for model_name, history in histories.items():
-        if "val_acc" in history:
-            values = history["val_acc"]
-        else:
-            values = history.get("test_acc", [])
+    if not val_top5:
+        print(f"[SKIP] {model_name} missing Top-5 history")
+        return
 
-        if not values:
-            continue
+    plt.figure(figsize=(8, 5))
 
-        epochs = range(1, len(values) + 1)
-        plt.plot(epochs, values, label=model_name)
+    plt.plot(
+        range(1, len(val_top5) + 1),
+        val_top5,
+        label="Validation Top-5",
+    )
 
     plt.xlabel("Epoch")
-    plt.ylabel("Validation Top-1 Accuracy (%)")
-    plt.title("Validation Top-1 Accuracy on CIFAR-10")
+    plt.ylabel("Top-5 Accuracy (%)")
+    plt.title(f"{model_name} - Validation Top-5 Accuracy")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -170,41 +229,21 @@ def plot_val_top1(histories: dict[str, dict], save_path: Path) -> None:
     plt.close()
 
 
-def plot_final_top1(histories: dict[str, dict], save_path: Path) -> None:
-    model_names: list[str] = []
-    final_accs: list[float] = []
-
-    for model_name, history in histories.items():
-        if "val_acc" in history and history["val_acc"]:
-            final_value = history["val_acc"][-1]
-        elif "test_acc" in history and history["test_acc"]:
-            final_value = history["test_acc"][-1]
-        else:
-            continue
-
-        model_names.append(model_name)
-        final_accs.append(final_value)
-
-    plt.figure(figsize=(10, 5))
-    plt.bar(model_names, final_accs)
-    plt.xlabel("Model")
-    plt.ylabel("Final Top-1 Accuracy (%)")
-    plt.title("Final Validation Top-1 Accuracy on CIFAR-10")
-    plt.xticks(rotation=20, ha="right")
-    plt.grid(True, axis="y")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-
-def save_summary_table(histories: dict[str, dict], save_path: Path) -> None:
+def save_summary_table(
+    histories: dict[str, dict],
+    save_path: Path,
+) -> None:
+    """
+    Save summary metrics for all models into JSON format.
+    """
     rows = []
 
     for model_name, history in histories.items():
         train_loss = history.get("train_loss", [])
         val_loss = history.get("val_loss", [])
-        val_acc = history.get("val_acc", history.get("test_acc", []))
-        val_top5 = history.get("val_top5_acc", [])
+        train_top1 = history.get("train_top1", [])
+        val_top1 = history.get("val_top1", [])
+        val_top5 = history.get("val_top5", [])
 
         rows.append(
             {
@@ -212,60 +251,85 @@ def save_summary_table(histories: dict[str, dict], save_path: Path) -> None:
                 "epochs": len(train_loss),
                 "final_train_loss": train_loss[-1] if train_loss else None,
                 "final_val_loss": val_loss[-1] if val_loss else None,
-                "final_val_top1": val_acc[-1] if val_acc else None,
-                "best_val_top1": max(val_acc) if val_acc else None,
+                "final_train_top1": train_top1[-1] if train_top1 else None,
+                "final_val_top1": val_top1[-1] if val_top1 else None,
+                "best_val_top1": max(val_top1) if val_top1 else None,
                 "final_val_top5": val_top5[-1] if val_top5 else None,
             }
         )
 
-    with open(save_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=4)
+    with open(save_path, "w", encoding="utf-8") as file:
+        json.dump(rows, file, indent=4)
 
 
 def parse_args() -> argparse.Namespace:
+    """
+    Parse command-line arguments.
+    """
     parser = argparse.ArgumentParser(
-        description="Plot CIFAR-10 training histories for RepVGG presets and baselines"
+        description="Create 3 plots for each model"
     )
+
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--figures_dir", type=str, default="figures")
+
     parser.add_argument(
         "--augmentation_mode",
         type=str,
-        default="strong",
-        choices=["simple", "strong"],
+        default="recommended",
+        choices=["simple", "recommended"],
     )
+
     parser.add_argument("--subset_fraction", type=float, default=1.0)
-    parser.add_argument("--run_b_variants", type=str, default="true")
+
     return parser.parse_args()
 
 
-def str2bool(value: str) -> bool:
-    return value.lower() in {"1", "true", "yes", "y"}
-
-
 def main() -> None:
+    """
+    Load histories, generate plots, and save summary table.
+    """
     args = parse_args()
 
     results_dir = Path(args.results_dir)
     figures_dir = Path(args.figures_dir)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    run_b_variants = str2bool(args.run_b_variants)
-
     histories = load_histories(
         results_dir=results_dir,
         augmentation_mode=args.augmentation_mode,
         subset_fraction=args.subset_fraction,
-        run_b_variants=run_b_variants,
     )
 
-    plot_train_loss(histories, figures_dir / "train_loss_comparison.png")
-    plot_val_loss(histories, figures_dir / "val_loss_comparison.png")
-    plot_val_top1(histories, figures_dir / "val_top1_comparison.png")
-    plot_final_top1(histories, figures_dir / "final_top1_comparison.png")
-    save_summary_table(histories, figures_dir / "summary_table.json")
+    for model_name, history in histories.items():
+        model_dir = figures_dir / safe_name(model_name)
+        model_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Saved plots and summary to:", figures_dir)
+        model_tag = safe_name(model_name)
+
+        plot_loss(
+            model_name=model_name,
+            history=history,
+            save_path=model_dir / f"{model_tag}_loss.png",
+        )
+
+        plot_top1(
+            model_name=model_name,
+            history=history,
+            save_path=model_dir / f"{model_tag}_top1.png",
+        )
+
+        plot_top5(
+            model_name=model_name,
+            history=history,
+            save_path=model_dir / f"{model_tag}_top5.png",
+        )
+
+    save_summary_table(
+        histories=histories,
+        save_path=figures_dir / "summary_table.json",
+    )
+
 
 
 if __name__ == "__main__":
