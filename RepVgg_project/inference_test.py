@@ -10,6 +10,7 @@ import tempfile
 
 from models.repvgg_net import build_repvgg
 from models.baselines import create_resnet18, create_resnet34
+from repvgg_with_branches import create_repvgg_with_branches
 
 # ----------------------------
 # PATHS
@@ -30,6 +31,7 @@ INPUT_SIZE = (1, 3, 32, 32)
 # TARGET KEYS
 # ----------------------------
 MODEL_KEYS = ["A0", "A1", "A2", "B0", "B1", "resnet18", "resnet34"]
+STUDENT_KEYS = ["a1_default", "a1_light", "a1_strong", "b1_default", "b1_light", "b1_strong"]
 
 TEACHER_CKPT = "./teacher_resnet18.pth"
 
@@ -109,13 +111,12 @@ def load_weights(model, path: str):
 
     ckpt = torch.load(path, map_location="cpu")
 
-    # extract ONLY weights
-    state_dict = ckpt["model_state_dict"]
+    # extract ONLY weights if others included
+    # state_dict = ckpt["model_state_dict"]
 
     # load safely
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(ckpt, strict=False)
     return model
-
 
 # ----------------------------
 # METRICS
@@ -166,12 +167,20 @@ def model_size_mb(model):
 def benchmark(name, model, deploy=False):
     print(f"\n===== {name} | deploy={deploy} =====")
 
+    # ALWAYS move model first
+    model = model.to(DEVICE_CPU)  # use CPU for FLOPs consistency
+    model.eval()
+
     p = params(model)
     f = flops(model)
     size = model_size_mb(model)
 
     cpu = latency(model, DEVICE_CPU)
-    gpu = latency(model, DEVICE_GPU) if torch.cuda.is_available() else None
+
+    gpu = None
+    if torch.cuda.is_available():
+        model_gpu = copy.deepcopy(model).to(DEVICE_GPU)
+        gpu = latency(model_gpu, DEVICE_GPU)
 
     print(f"Params: {p/1e6:.2f} M")
     print(f"Size: {size:.2f} MB")
@@ -197,34 +206,37 @@ def benchmark(name, model, deploy=False):
 def main():
     results = []
 
-    for key in MODEL_KEYS:
+    for key in STUDENT_KEYS:
         ckpt = find_ckpt(key)
 
         if ckpt is None:
             print(f"[WARN] Missing checkpoint for {key}")
             continue
 
-        print(f"\n[LOAD] {ckpt.name}")
+        # print(f"\n[LOAD] {ckpt.name}")
 
-        model = build_model(key)
+        # for students model
+        model = create_repvgg_with_branches()
+        # for reproducton model
+        # model = build_model(key)
         model = load_weights(model, ckpt)
 
         # non-deploy (if RepVGG, you need a separate model construction logic)
         results.append(benchmark(key, model, deploy=False))
 
         # deploy version (only meaningful for RepVGG)
-        if key in ["A0", "A1", "A2", "B0", "B1"]:
+        if key in STUDENT_KEYS:
             model_deploy = repvgg_model_convert(model, do_copy=True)
             results.append(benchmark(key, model_deploy, deploy=True))
 
     # -----------------------------
     # TEACHER MODEL (ResNet-18)
-    # -----------------------------
-    teacher = build_teacher()
-    teacher = load_teacher(teacher, TEACHER_CKPT)
-
-    results.append(benchmark("teacher_resnet18", teacher, deploy=False))
-
+    # # -----------------------------
+    # teacher = build_teacher()
+    # teacher = load_teacher(teacher, TEACHER_CKPT)
+    #
+    # results.append(benchmark("teacher_resnet18", teacher, deploy=False))
+    #
     df = pd.DataFrame(results)
     out =  "./results.csv"
     df.to_csv(out, index=False)
