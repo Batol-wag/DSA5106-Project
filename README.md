@@ -1,4 +1,4 @@
-# DSA5106 Project — RepVGG with Branch-Level Knowledge Distillation
+# DSA5106 Project — RepVGG: Evaluation, Reproduction, and Extension of VGG-Style ConvNets
 
 A reproduction and extension of **RepVGG on CIFAR-10**.  
 
