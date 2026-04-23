@@ -35,7 +35,7 @@ The `main` branch should be treated as the primary branch for reviewing the repr
 │   ├── models/
 │   │   ├── repvgg_block.py             # RepVGG block (training/deploy modes)
 │   │   ├── repvgg_net.py               # Full RepVGG architecture
-│   │   └── baselines.py                # PlainCNN and ResNet baselines
+│   │   └── baselines.py                # ResNet baselines
 │   ├── utils/
 │   │   ├── fusion.py                   # Conv-BN fusion utilities
 │   │   └── metrics.py                  # Accuracy/loss utilities
