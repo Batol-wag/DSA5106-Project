@@ -1,0 +1,55 @@
+# Presentation Metrics for RepVGG Project
+
+## Recommended Metrics for Presentation
+
+- **Best Test Accuracy**
+  - Extract from `results/<model>_history.json`.
+  - Compare the final performance of RepVGG, PlainCNN, and ResNet-18.
+
+- **Training Loss & Test Accuracy Curves**
+  - Used to demonstrate convergence speed and stability across models.
+  - Can be generated via `plot_histories.py`:
+    - `figures/train_loss_comparison.png`
+    - `figures/test_accuracy_comparison.png`
+
+- **Number of Parameters & Model Size**
+  - Used to compare model complexity.
+  - Helps highlight efficiency differences between RepVGG and PlainCNN/ResNet-18.
+
+- **Accuracy Difference Before and After Deployment**
+  - A key metric in the RepVGG proposal.
+  - If `checkpoints/repvgg_best.pth` exists, use `metrics_report.py` to compute the accuracy difference before and after deployment.
+
+- **Average Training Time per Epoch**
+  - Used to evaluate training efficiency and computational cost.
+
+## How to Run
+
+1. Use existing training results:
+
+```bash
+python metrics_report.py
+```
+
+2. If you need to train and save models:
+
+```bash
+python train.py --model repvgg --epochs 20 --batch_size 64
+python train.py --model plaincnn --epochs 20 --batch_size 64
+python train.py --model resnet18 --epochs 20 --batch_size 64
+```
+
+3. After generating the report, open:
+
+- `reports/metrics_summary.md`
+- `reports/metrics_summary.json`
+
+## Result Description
+
+- `metrics_summary.md` contains a formatted report with all model metrics.
+- `metrics_summary.json` can be used for further automation (e.g., plotting or report generation).
+
+## Notes
+
+- If the `results/` directory does not exist, run `train.py` first to generate training history.
+- If `checkpoints/repvgg_best.pth` is missing, deployment validation will be skipped by `metrics_report.py`.

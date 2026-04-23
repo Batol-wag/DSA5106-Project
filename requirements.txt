@@ -1,0 +1,10 @@
+# Core training dependencies
+torch
+torchvision
+tqdm
+
+# Reporting and plotting
+matplotlib
+
+# Test dependencies
+pytest

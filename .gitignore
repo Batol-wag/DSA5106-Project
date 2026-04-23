@@ -1,0 +1,18 @@
+# dataset
+data/
+RepVgg_project/data/
+
+# checkpoints / model weights
+checkpoints/
+RepVgg_project/checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# mac
+.DS_Store
